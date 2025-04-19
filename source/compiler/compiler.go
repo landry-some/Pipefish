@@ -182,7 +182,6 @@ func (cp *Compiler) Do(line string) values.Value {
 // The node types in the switch are in alphabetical order.
 func (cp *Compiler) CompileNode(node ast.Node, ctxt Context) (AlternateType, bool) {
 	cp.Cm("Compiling node of type "+(reflect.TypeOf(node).String())[5:]+" with literal "+text.Emph(node.GetToken().Literal)+".", node.GetToken())
-	cp.Cm("Node is "+node.String(), node.GetToken())
 	cp.showCompile = settings.SHOW_COMPILER && !(settings.IGNORE_BOILERPLATE && settings.ThingsToIgnore.Contains(node.GetToken().Source)) || testing.Testing()
 	rtnTypes, rtnConst := AlternateType{}, true
 	state := cp.GetState()
@@ -391,7 +390,7 @@ NodeTypeSwitch:
 		indexType, idxConst := cp.CompileNode(node.Index, newContext)
 		index := cp.That()
 		rtnConst = ctrConst && idxConst
-		errTok := cp.reserveToken(node.GetToken())
+		errTok := cp.ReserveToken(node.GetToken())
 		// Things we can index:
 		// Lists, by integers; or a pair for a slice.
 		// Tuples, ditto.
@@ -882,7 +881,7 @@ NodeTypeSwitch:
 		}
 		if node.Token.Type == token.UNWRAP {
 			_, rtnConst = cp.CompileNode(node.Args[0], ctxt.x())
-			errTok := cp.reserveToken(node.GetToken())
+			errTok := cp.ReserveToken(node.GetToken())
 			cp.put(vm.Uwrp, cp.That(), errTok)
 			rtnTypes = AltType(values.ERROR).Union(cp.GetAlternateTypeFromTypeName("Error"))
 			break
@@ -1018,7 +1017,7 @@ NodeTypeSwitch:
 				rtnTypes = altType(values.TUPLE)
 				break NodeTypeSwitch
 			}
-			cp.put(vm.TuLx, cp.That(), cp.reserveToken(node.Args[0].GetToken()))
+			cp.put(vm.TuLx, cp.That(), cp.ReserveToken(node.Args[0].GetToken()))
 			rtnTypes = altType(values.ERROR, values.TUPLE)
 			break NodeTypeSwitch
 		}
@@ -1446,7 +1445,7 @@ func (cp *Compiler) compileForExpression(node *ast.ForExpression, ctxt Context) 
 				if keysOnly {
 					keysInt = 1
 				}
-				cp.put(vm.Mkit, cp.That(), keysInt, cp.reserveToken(rangeOver.GetToken())) // TODO --- optimize constant case.
+				cp.put(vm.Mkit, cp.That(), keysInt, cp.ReserveToken(rangeOver.GetToken())) // TODO --- optimize constant case.
 				iteratorLoc = cp.That()
 				if !valuesOnly {
 					cp.Reserve(values.UNDEFINED_TYPE, nil, rangeOver.GetToken())
@@ -1761,7 +1760,7 @@ func (cp *Compiler) CompileGivenBlock(given ast.Node, ctxt Context) {
 	cp.Cm("Compiling 'given' block.", given.GetToken())
 	nameToNode := map[string]*ast.AssignmentExpression{}
 	nameGraph := dtypes.Digraph[string]{}
-	chunks := cp.getPartsOfGiven(given, ctxt)
+	chunks := cp.SplitOnNewlines(given)
 	for _, chunk := range chunks {
 		if chunk.GetToken().Type != token.GVN_ASSIGN {
 			cp.Throw("comp/given/assign", chunk.GetToken())
@@ -1813,19 +1812,17 @@ func (cp *Compiler) CompileGivenBlock(given ast.Node, ctxt Context) {
 
 // Function auxiliary to the previous one, `CompileGivenBlock`, to break down a `given` block into its
 // component declarations so they can be passed one by one to the next function, `compileOneGivenBlock`.
-func (cp *Compiler) getPartsOfGiven(given ast.Node, ctxt Context) []ast.Node {
+func (cp *Compiler) SplitOnNewlines(block ast.Node) []ast.Node {
 	result := []ast.Node{}
-	switch branch := given.(type) {
+	switch branch := block.(type) {
 	case *ast.LazyInfixExpression:
 		if branch.Token.Literal == ";" {
-			result = cp.getPartsOfGiven(branch.Left, ctxt)
-			rhs := cp.getPartsOfGiven(branch.Right, ctxt)
+			result = cp.SplitOnNewlines(branch.Left)
+			rhs := cp.SplitOnNewlines(branch.Right)
 			result = append(result, rhs...)
-		} else {
-			cp.Throw("comp/given/unexpected", given.GetToken())
 		}
 	default:
-		result = []ast.Node{given}
+		result = []ast.Node{block}
 	}
 	return result
 }
@@ -1923,13 +1920,22 @@ func (cp *Compiler) getLambdaStart() uint32 {
 }
 
 // A function for making snippet factories.
-
 func (cp *Compiler) reserveSnippetFactory(env *Environment, node *ast.SnippetLiteral, ctxt Context) uint32 {
 	cp.Cm("Reserving snippet factory.", &node.Token)
 	snF := &vm.SnippetFactory{}
 	snF.Bindle = cp.compileSnippet(node.GetToken(), env, node.Token.Literal, ctxt)
 	cp.Vm.SnippetFactories = append(cp.Vm.SnippetFactories, snF)
 	return uint32(len(cp.Vm.SnippetFactories) - 1)
+}
+
+// Reserves information to be emitted when a typecheck fails at runtime.
+// TODO --- move to intializer.
+func (cp *Compiler) ReserveTypeCheckError(node ast.Node, typename string, valLoc uint32) uint32 {
+	cp.Cm("Reserving typeCheckError factory.", node.GetToken())
+	err := &vm.TypeCheckError{Tok: node.GetToken(), Condition: cp.P.PrettyPrint(node),
+		Type: typename, Value: valLoc}
+	cp.Vm.TypeCheckErrors = append(cp.Vm.TypeCheckErrors, err)
+	return uint32(len(cp.Vm.TypeCheckErrors) - 1)
 }
 
 // Compiles a test for equality.
@@ -1977,7 +1983,7 @@ func (cp *Compiler) compileEquals(node *ast.ComparisonExpression, ctxt Context) 
 			}
 		}
 	}
-	cp.put(vm.Eqxx, leftRg, rightRg, cp.reserveToken(node.GetToken()))
+	cp.put(vm.Eqxx, leftRg, rightRg, cp.ReserveToken(node.GetToken()))
 	return AltType(values.ERROR, values.BOOL), lcst && rcst
 }
 
@@ -2663,7 +2669,7 @@ func (cp *Compiler) reserveError(ec string, tok *token.Token, args ...any) uint3
 	return cp.That()
 }
 
-func (cp *Compiler) reserveToken(tok *token.Token) uint32 {
+func (cp *Compiler) ReserveToken(tok *token.Token) uint32 {
 	cp.Vm.Tokens = append(cp.Vm.Tokens, tok)
 	return cp.ThatToken()
 }

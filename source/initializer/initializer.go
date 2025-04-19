@@ -116,7 +116,7 @@ func StartCompiler(scriptFilepath, sourcecode string, hubServices map[string]*co
 	iz := NewInitializer()
 	iz.Common = NewCommonInitializerBindle(store)
 	iz.Common.HubCompilers = hubServices
-	// We then carry out five phases of initialization each of which is performed recursively on all of the
+	// We then carry out eleven phases of initialization each of which is performed recursively on all of the
 	// modules in the dependency tree before moving on to the next. (The need to do this is in fact what
 	// defines the phases, so you shouldn't bother looking for some deeper logic in that.)
 	iz.cmI("Parsing everything.")
@@ -845,7 +845,7 @@ func (iz *initializer) createClones() {
 		// We get the requested builtins.
 		var opList []string
 		usingOrEof := tokens.NextToken()
-		if usingOrEof.Type != token.EOF {
+		if usingOrEof.Type != token.EOF && usingOrEof.Type != token.COLON {
 			if usingOrEof.Literal != "using" {
 				iz.Throw("init/clone/using", &usingOrEof)
 				return
@@ -854,7 +854,7 @@ func (iz *initializer) createClones() {
 				op := tokens.NextToken()
 				sep := tokens.NextToken()
 				opList = append(opList, strings.Trim(op.Literal, "\n\r\t "))
-				if sep.Type == token.EOF {
+				if sep.Type == token.EOF || sep.Type == token.COLON {
 					break
 				}
 				if sep.Type != token.COMMA {
@@ -1046,7 +1046,23 @@ func (iz *initializer) addConstructorsToParserAndParseStructDeclarations() {
 func (iz *initializer) createStructNamesAndLabels() {
 	iz.structDeclarationNumberToTypeNumber = make(map[int]values.ValueType)
 	for i, node := range iz.ParsedDeclarations[structDeclaration] {
-		lhs := node.(*ast.AssignmentExpression).Left
+		var shouldAssign ast.Node
+		if colon, ok := node.(*ast.LazyInfixExpression); ok {
+			if colon.Operator != ":" {
+				iz.Throw("init/struct/colon", node.GetToken())
+				continue
+			}
+			shouldAssign = colon.Left
+		} else {
+			shouldAssign = node
+		}
+		var lhs ast.Node
+		if assign, ok := shouldAssign.(*ast.AssignmentExpression); !ok {
+			iz.Throw("init/struct/assign", node.GetToken())
+			continue
+		} else {
+			lhs = assign.Left
+		}
 		name := lhs.GetToken().Literal
 		typeNo := values.ValueType(len(iz.cp.Vm.ConcreteTypeInfo))
 		typeInfo, typeExists := iz.getDeclaration(decSTRUCT, node.GetToken(), DUMMY)
@@ -1075,7 +1091,7 @@ func (iz *initializer) createStructNamesAndLabels() {
 		// The parser needs to know about it too.
 		iz.p.Functions.Add(name)
 		iz.p.AllFunctionIdents.Add(name)
-		sig := node.(*ast.AssignmentExpression).Right.(*ast.StructExpression).Sig
+		sig := shouldAssign.(*ast.AssignmentExpression).Right.(*ast.StructExpression).Sig
 		fn := &ast.PrsrFunction{NameSig: sig, Body: &ast.BuiltInExpression{Name: name}, Number: DUMMY, Compiler: iz.cp, Tok: node.GetToken()}
 		iz.Add(name, fn) // TODO --- give them their own ast type?
 		iz.fnIndex[fnSource{structDeclaration, i}] = fn
@@ -1457,9 +1473,19 @@ func (iz *initializer) compileAllConstructors() {
 func (iz *initializer) compileConstructors() {
 	// Struct declarations.
 	for i, node := range iz.ParsedDeclarations[structDeclaration] {
-		name := node.(*ast.AssignmentExpression).Left.GetToken().Literal // We know this and the next line are safe because we already checked in createStructs
+		var shouldAssign ast.Node
+		if colon, ok := node.(*ast.LazyInfixExpression); ok {
+			if colon.Operator != ":" {
+				iz.Throw("init/struct/colon", node.GetToken())
+				continue
+			}
+			shouldAssign = colon.Left
+		} else {
+			shouldAssign = node
+		}
+		name := shouldAssign.(*ast.AssignmentExpression).Left.GetToken().Literal // We know this and the next line are safe because we already checked in createStructs
 		typeNo := iz.cp.ConcreteTypeNow(name)
-		sig := node.(*ast.AssignmentExpression).Right.(*ast.StructExpression).Sig
+		sig := shouldAssign.(*ast.AssignmentExpression).Right.(*ast.StructExpression).Sig
 		iz.fnIndex[fnSource{structDeclaration, i}].Number = iz.addToBuiltins(sig, name, altType(typeNo), iz.IsPrivate(int(structDeclaration), i), node.GetToken())
 		iz.fnIndex[fnSource{structDeclaration, i}].Compiler = iz.cp
 	}
@@ -1651,7 +1677,13 @@ func (iz *initializer) addFieldsToStructs() {
 	for i, node := range iz.ParsedDeclarations[structDeclaration] {
 		structNumber := iz.structDeclarationNumberToTypeNumber[i]
 		structInfo := iz.cp.Vm.ConcreteTypeInfo[structNumber].(vm.StructType)
-		sig := node.(*ast.AssignmentExpression).Right.(*ast.StructExpression).Sig
+		var shouldAssign ast.Node
+		if colon, ok := node.(*ast.LazyInfixExpression); ok {
+			shouldAssign = colon.Left
+		} else {
+			shouldAssign = node
+		}
+		sig := shouldAssign.(*ast.AssignmentExpression).Right.(*ast.StructExpression).Sig
 		structTypes := make([]values.AbstractType, 0, len(sig))
 		for _, labelNameAndType := range sig {
 			typeName := labelNameAndType.VarType
@@ -1737,11 +1769,11 @@ func (iz *initializer) CompileEverything() [][]labeledParsedCodeChunk { // TODO 
 					iz.p.Throw("init/name/exists/a", dec.GetToken(), iz.ParsedDeclarations[existingName[0].decType][existingName[0].decNumber].GetToken(), name)
 					return nil
 				}
-				namesToDeclarations[name] = []labeledParsedCodeChunk{{dec, dT, i}}
+				namesToDeclarations[name] = []labeledParsedCodeChunk{{dec, dT, i, name}}
 			}
 		}
 	}
-	iz.cmI("Extracting variable names from functions.")
+	iz.cmI("Mapping names of functions to their declarations.")
 	for dT := functionDeclaration; dT <= commandDeclaration; dT++ {
 		for i, dec := range iz.ParsedDeclarations[dT] {
 			name, _, _, _, _, _ := iz.p.ExtractPartsOfFunction(dec) // TODO --- refactor ExtractPartsOfFunction so there's a thing called ExtractNameOfFunction which you can call there and here.
@@ -1756,12 +1788,38 @@ func (iz *initializer) CompileEverything() [][]labeledParsedCodeChunk { // TODO 
 						iz.p.Throw("init/name/exists/c", dec.GetToken(), iz.ParsedDeclarations[existingName.decType][existingName.decNumber].GetToken(), name)
 					}
 				}
-				namesToDeclarations[name] = append(names, labeledParsedCodeChunk{dec, dT, i})
+				namesToDeclarations[name] = append(names, labeledParsedCodeChunk{dec, dT, i, name})
 			} else {
-				namesToDeclarations[name] = []labeledParsedCodeChunk{{dec, dT, i}}
+				namesToDeclarations[name] = []labeledParsedCodeChunk{{dec, dT, i, name}}
 			}
 		}
 	}
+	iz.cmI("Adding struct typechecks to declarations.")
+	// Since the name of a type will appear already in the map as the name of the function
+	// constructing it, we'll mangle the names by adding a `*` to the front of each.
+	for i, dec := range iz.ParsedDeclarations[structDeclaration] {
+		if colon, ok := dec.(*ast.LazyInfixExpression); ok {
+			name := "*" + colon.Left.(*ast.AssignmentExpression).Left.(*ast.Identifier).Value
+			namesToDeclarations[name] = []labeledParsedCodeChunk{{colon.Right, structDeclaration, i, name[1:]}}
+		}
+	}
+	iz.cmI("Adding clone typechecks to declarations.")
+	// Since the name of a type will appear already in the map as the name of the function
+	// constructing it, we'll mangle the names by adding a `*` to the front of each.
+	for i, dec := range iz.TokenizedDeclarations[cloneDeclaration] {
+		iz.ParsedDeclarations[cloneDeclaration] = make(parser.ParsedCodeChunks, len(iz.TokenizedDeclarations[cloneDeclaration]))
+		dec.ToStart()
+		tok := dec.NextToken()
+		name := "*" + tok.Literal
+		for ; tok.Type != token.NEWLINE && tok.Type != token.EOF && tok.Type != token.COLON; tok = dec.NextToken() {
+		}
+		if tok.Type == token.COLON {
+			iz.cp.P.TokenizedCode = dec
+			typecheck := iz.cp.P.ParseTokenizedChunk()
+			namesToDeclarations[name] = []labeledParsedCodeChunk{{typecheck, cloneDeclaration, i, name[1:]}}
+		}
+	}
+
 	iz.cmI("Building digraph of dependencies.")
 	// We build a digraph of the dependencies between the constant/variable/function/command declarations.
 	graph := dtypes.Digraph[string]{}
@@ -1864,7 +1922,6 @@ func (iz *initializer) CompileEverything() [][]labeledParsedCodeChunk { // TODO 
 		groupOfDeclarations := []labeledParsedCodeChunk{}
 		for _, nameToDeclare := range namesToDeclare {
 			groupOfDeclarations = append(groupOfDeclarations, namesToDeclarations[nameToDeclare]...)
-
 		}
 		// If the declaration type is constant or variable it must be the only member of its Tarjan partion and there must only be one thing of that name.
 		if groupOfDeclarations[0].decType == constantDeclaration || groupOfDeclarations[0].decType == variableDeclaration {
@@ -1879,16 +1936,22 @@ func (iz *initializer) CompileEverything() [][]labeledParsedCodeChunk { // TODO 
 		iz.cp.RecursionStore = []compiler.BkRecursion{} // The compiler will put all the places it needs to backtrack for recursion here.
 		fCount := uint32(len(iz.cp.Fns))                // We can give the function data in the parser the right numbers for the group of functions in the parser before compiling them, since we know what order they come in.
 		for _, dec := range groupOfDeclarations {
-			iz.fnIndex[fnSource{dec.decType, dec.decNumber}].Number = fCount
-			iz.fnIndex[fnSource{dec.decType, dec.decNumber}].Compiler = iz.cp
-			fCount++
+			if dec.decType == functionDeclaration || dec.decType == commandDeclaration {
+				iz.fnIndex[fnSource{dec.decType, dec.decNumber}].Number = fCount
+				iz.fnIndex[fnSource{dec.decType, dec.decNumber}].Compiler = iz.cp
+				fCount++
+			}
 		}
 		for _, dec := range groupOfDeclarations {
 			switch dec.decType {
+			case structDeclaration, cloneDeclaration:
+				iz.compileTypecheck(dec.name, dec.chunk)
+				
+				continue
 			case functionDeclaration:
-				iz.compileFunction(iz.ParsedDeclarations[functionDeclaration][dec.decNumber], iz.IsPrivate(int(dec.decType), dec.decNumber), iz.cp.GlobalConsts, functionDeclaration)
+				iz.compileFunction(dec.chunk, iz.IsPrivate(int(dec.decType), dec.decNumber), iz.cp.GlobalConsts, functionDeclaration)
 			case commandDeclaration:
-				iz.compileFunction(iz.ParsedDeclarations[commandDeclaration][dec.decNumber], iz.IsPrivate(int(dec.decType), dec.decNumber), iz.cp.GlobalVars, commandDeclaration)
+				iz.compileFunction(dec.chunk, iz.IsPrivate(int(dec.decType), dec.decNumber), iz.cp.GlobalVars, commandDeclaration)
 			}
 			iz.fnIndex[fnSource{dec.decType, dec.decNumber}].Number = uint32(len(iz.cp.Fns) - 1) // TODO --- is this necessary given the line a little above which seems to do this pre-emptively?
 		}
@@ -2019,6 +2082,43 @@ func (iz *initializer) getEnvAndAccessForConstOrVarDeclaration(dT declarationTyp
 		}
 	}
 	return envToAddTo, vAcc
+}
+
+// Method for compiling the runtime typechecks on structs and clones
+func (iz *initializer) compileTypecheck(name string, node ast.Node) {
+	typeNumber, _ := iz.cp.GetConcreteType(name)
+	typeInfo := iz.cp.TypeInfoNow(name)
+	thatType := typeNumber
+	if typeInfo.IsClone() {
+		thatType = typeInfo.(vm.CloneType).Parent
+	}
+	iz.cmI("Compiling typecheck for '" + name + "'")
+	callAddress := iz.cp.CodeTop()
+	info := iz.cp.Vm.ConcreteTypeInfo[typeNumber]
+	resultLoc := iz.cp.Reserve(values.UNDEFINED_TYPE, nil, node.GetToken())
+	tokNumberLoc := iz.cp.Reserve(values.UNDEFINED_TYPE, nil, node.GetToken())
+	newEnv := compiler.NewEnvironment()
+	newEnv.Ext = iz.cp.GlobalConsts
+	inLoc := iz.cp.Reserve(values.UNDEFINED_TYPE, nil, node.GetToken())
+	iz.cp.AddVariable(newEnv, "that", compiler.VERY_LOCAL_VARIABLE, altType(thatType), node.GetToken())
+	chunks := iz.cp.SplitOnNewlines(node)
+	for _, chunk := range chunks {
+		context := compiler.Context{Env: newEnv}
+		rTypes, _ := iz.cp.CompileNode(chunk, context)
+		if !rTypes.Contains(values.BOOL) {
+			iz.Throw("init/typecheck/bool", chunk.GetToken(), iz.cp.P.PrettyPrint(chunk), name)
+		}
+		errNo := iz.cp.ReserveTypeCheckError(chunk, name, inLoc)
+		iz.cp.Emit(vm.Chck, resultLoc, iz.cp.That(), tokNumberLoc, errNo) // This will do its own early return from the typecheck.
+	}
+	iz.cp.Emit(vm.Ret)
+	typeCheck := &vm.TypeCheck{CallAddress: callAddress, InLoc: inLoc, ResultLoc: resultLoc, TokNumberLoc: tokNumberLoc}
+	if info.IsClone() {
+		info = info.(vm.CloneType).AddTypeCheck(typeCheck)
+	} else {
+		info = info.(vm.StructType).AddTypeCheck(typeCheck)
+	}
+	iz.cp.Vm.ConcreteTypeInfo[typeNumber] = info
 }
 
 // Method for compiling a top-level function.
@@ -2329,6 +2429,7 @@ type labeledParsedCodeChunk struct {
 	chunk     ast.Node
 	decType   declarationType
 	decNumber int
+	name      string
 }
 
 func (iz *initializer) addTokenizedDeclaration(decType declarationType, line *token.TokenizedCodeChunk, private bool) {

@@ -869,6 +869,11 @@ func (p *Parser) parseStructExpression() ast.Node {
 	p.NextToken()
 	sigtree := p.parseExpression(FPREFIX)
 	expression.Sig = p.extractSig(p.recursivelyListify(sigtree))
+	if p.curToken.Type == token.COLON {
+		p.NextToken()
+		expression.Check = p.parseExpression(COLON)
+		println("Found", p.prettyPrint(expression.Check, printContext{}))
+	}
 	return expression
 }
 

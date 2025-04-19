@@ -123,7 +123,7 @@ func (cp *Compiler) createFunctionCall(argCompiler *Compiler, node ast.Callable,
 				cp.Emit(vm.Qtyp, cp.That(), uint32(tp(values.ERROR)), cp.CodeTop()+4)
 				backtrackList[i] = cp.CodeTop()
 				cp.Emit(vm.Asgm, DUMMY, cp.That())
-				cp.Emit(vm.Adtk, cp.That(), cp.That(), cp.reserveToken(arg.GetToken()))
+				cp.Emit(vm.Adtk, cp.That(), cp.That(), cp.ReserveToken(arg.GetToken()))
 				cp.Emit(vm.Ret)
 			}
 		}
@@ -143,7 +143,7 @@ func (cp *Compiler) createFunctionCall(argCompiler *Compiler, node ast.Callable,
 	}
 	if returnTypes.Contains(values.ERROR) {
 		cp.Emit(vm.Qtyp, cp.That(), uint32(values.ERROR), cp.CodeTop()+2)
-		cp.Emit(vm.Adtk, cp.That(), cp.That(), cp.reserveToken(b.tok))
+		cp.Emit(vm.Adtk, cp.That(), cp.That(), cp.ReserveToken(b.tok))
 	}
 	cp.cmP("Returning from createFunctionCall.", b.tok)
 	return returnTypes, cst && !b.override
@@ -322,7 +322,7 @@ func (cp *Compiler) generateBranch(b *bindle) AlternateType {
 				cp.cmP("Consuming one element of the tuple.", b.tok)
 				typesFromGoingAcross = cp.generateMoveAlongBranchViaTupleElement(&newBindle)
 			}
-		case  len(acceptedSingleTypes) > 0 && len(acceptedTuples) == 0:
+		case len(acceptedSingleTypes) > 0 && len(acceptedTuples) == 0:
 			cp.cmP("Nothing but single types", b.tok)
 			if acceptedTypes.Contains(values.TUPLE) {
 				cp.reserveError("vm/types/b", b.tok)
@@ -374,10 +374,10 @@ func (cp *Compiler) generateBranch(b *bindle) AlternateType {
 }
 
 var TYPE_COMPARISONS = map[string]vm.Opcode{
-	"any":      vm.Qsng,
-	"any?":     vm.Qsnq,
-	"struct":   vm.Qstr,
-	"struct?":  vm.Qstq,
+	"any":     vm.Qsng,
+	"any?":    vm.Qsnq,
+	"struct":  vm.Qstr,
+	"struct?": vm.Qstq,
 }
 
 // The reason why this and the following two functions exist is that we need to be able to emit restrictions on what values we
@@ -420,7 +420,6 @@ func (cp *Compiler) emitTypeComparisonFromTypeName(typeAsString string, mem uint
 	}
 	// It may be a tuple. TODO --- I'm not sure whether I can instead safely address this case just by adding "tuple" to the cp.TypeNameToTypeList.
 	if typeAsString == "tuple" {
-		println("Emitting tuple check at", mem)
 		cp.Emit(vm.Qtyp, mem, uint32(values.TUPLE), DUMMY)
 		return bkGoto(cp.CodeTop() - 1)
 	}
@@ -554,7 +553,7 @@ func (cp *Compiler) seekFunctionCall(b *bindle) AlternateType {
 	// a tree, but there's a varargs as the next parameter, in which case we can move
 	// along that branch and try again.
 	var finished bool
-	for !finished { 
+	for !finished {
 		for _, branch := range b.treePosition.Branch {
 			if branch.Node.Fn != nil {
 				resolvingCompiler := branch.Node.Fn.Compiler.(*Compiler)
@@ -577,7 +576,7 @@ func (cp *Compiler) seekFunctionCall(b *bindle) AlternateType {
 					cp.emitCallOpcode(fNo, b.valLocs) // As the fNo doesn't exist this will just fill in dummy values for addresses and locations.
 					cp.Emit(vm.Rpop)
 					cp.Emit(vm.Asgm, b.outLoc, DUMMY) // We don't know where the function's output will be yet.
-					b.override = true              // We can't do constant folding on a dummy function call.
+					b.override = true                 // We can't do constant folding on a dummy function call.
 					return cp.rtnTypesToTypeScheme(branch.Node.Fn.Compiler.(*Compiler).P.MakeAbstractSigFromStringSig(branch.Node.Fn.NameRets))
 				}
 				F := resolvingCompiler.Fns[fNo]
@@ -632,18 +631,34 @@ func (cp *Compiler) seekFunctionCall(b *bindle) AlternateType {
 					return functionAndType.T
 				}
 				typeNumber, ok := cp.GetConcreteType(builtinTag)
-				// It might be a short-form struct constructor.
-				if ok && cp.IsStruct(builtinTag) {
-					args := append([]uint32{b.outLoc, uint32(typeNumber)}, b.valLocs...)					
-					cp.cmP("Emitting short form constructor.", b.tok)
-					cp.Emit(vm.Strc, args...)
-					return AltType(typeNumber)
-				}
-				// It might be a clone type constructor.
-				if ok && cp.topRCompiler().isClone(builtinTag) {
-					cp.cmP("Emitting clone constructor.", b.tok)
-					cp.Emit(vm.Cast, b.outLoc, b.valLocs[0], uint32(typeNumber))
-					return AltType(typeNumber)
+				typeInfo := cp.Vm.ConcreteTypeInfo[typeNumber]
+				if ok && (typeInfo.IsStruct() || typeInfo.IsClone()) {
+					var typeCheck *vm.TypeCheck
+					// It might be a short-form struct constructor.
+					if typeInfo.IsStruct() {
+						args := append([]uint32{b.outLoc, uint32(typeNumber)}, b.valLocs...)
+						cp.cmP("Emitting short form constructor.", b.tok)
+						cp.Emit(vm.Strc, args...)
+						typeCheck = typeInfo.(vm.StructType).TypeCheck
+					} else { // Or a clone constructor.
+						cp.cmP("Emitting clone constructor.", b.tok)
+						cp.Emit(vm.Cast, b.outLoc, b.valLocs[0], uint32(typeNumber))
+						typeCheck = typeInfo.(vm.CloneType).TypeCheck
+					}
+					if typeCheck == nil {
+						return AltType(typeNumber)
+					}
+					cp.Emit(vm.Asgm, typeCheck.ResultLoc, b.outLoc)
+					if typeInfo.IsClone() {
+						cp.Emit(vm.Asgm, typeCheck.InLoc, b.valLocs[0])
+					} else {
+						cp.Emit(vm.Asgm, typeCheck.InLoc, b.outLoc)
+					}
+					cp.Reserve(values.INT, int(cp.ReserveToken(b.tok)), b.tok)
+					cp.Emit(vm.Asgm, typeCheck.TokNumberLoc, cp.That())
+					cp.Emit(vm.Jsr, typeCheck.CallAddress)
+					cp.Emit(vm.Asgm, b.outLoc, typeCheck.ResultLoc)
+					return AltType(values.ERROR, typeNumber)
 				}
 				// It could have a Golang body.
 				if F.HasGo {
@@ -695,7 +710,7 @@ func (cp *Compiler) seekFunctionCall(b *bindle) AlternateType {
 		for _, branch := range b.treePosition.Branch {
 			if branch.IsVararg {
 				finished = false
-				b.treePosition = branch.Node 
+				b.treePosition = branch.Node
 				break
 			}
 		}
