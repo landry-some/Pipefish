@@ -20,9 +20,10 @@ The result of all this is expressed in the following table:
 | Has functions : | Has commands : |
 | (a) where the body is any expression | (a) where the body is one or more instructions |
 | (b) which is evaluated | (b) which are executed |
-| (c) which are inherently parallel | (c) which are inherently serial |
-| (d) returning a value | (d) returning only success or an error |
-| (e) which can only call functions | (e) which can call both functions and commands |
+| (c) which are composable| (c) which are concatenatable |
+| (d) which are inherently parallel | (d) which are inherently serial |
+| (e) returning a value | (e) returning only success or an error |
+| (f) which can only call functions | (f) which can call both functions and commands |
 | All local values are constant during a given function call | All local values are mutable |
 | Effectless | Exists only to perform side-effects |
 | Is pure | Can access global variables, the file system, the database ... |
